@@ -18,8 +18,15 @@ const crypto  = require('crypto');
 const PORT    = process.env.PORT    || 3001;
 const API_KEY = process.env.API_KEY || 'changeme';
 
+function log(level, ...args) {
+  const ts = new Date().toISOString();
+  console.log(`[${ts}] [${level}]`, ...args);
+}
+
 // ── Servidor HTTP base ──────────────────────────────────────────────────────
 const httpServer = http.createServer((req, res) => {
+  log('HTTP', `${req.method} ${req.url} from=${req.socket.remoteAddress}`);
+
   // Health check para proxies / load balancers
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -48,6 +55,12 @@ const httpServer = http.createServer((req, res) => {
   res.end();
 });
 
+// Log de upgrades WebSocket antes del handshake
+httpServer.on('upgrade', (req) => {
+  log('WS-UPGRADE', `url=${req.url} from=${req.socket.remoteAddress}`);
+  log('WS-UPGRADE', 'headers:', JSON.stringify(req.headers, null, 2));
+});
+
 // ── Mapa de sesiones activas ────────────────────────────────────────────────
 // sessionId → { ws, orgId, conversationId, participant, mediaFormat, seq, serverseq, startedAt }
 const sessions = new Map();
@@ -59,10 +72,17 @@ const wss = new WebSocketServer({
   // Verificar la API key durante el handshake HTTP
   verifyClient: (info, cb) => {
     const apiKey = info.req.headers['x-api-key'];
-    if (!apiKey || apiKey !== API_KEY) {
-      console.warn(`[AudioHook] Conexión rechazada — API key inválida (${info.req.socket.remoteAddress})`);
+    log('WS-VERIFY', `from=${info.req.socket.remoteAddress} url=${info.req.url}`);
+    log('WS-VERIFY', 'headers recibidos:', JSON.stringify(info.req.headers, null, 2));
+    if (!apiKey) {
+      log('WS-VERIFY', 'RECHAZADO — falta cabecera x-api-key');
       return cb(false, 401, 'Unauthorized');
     }
+    if (apiKey !== API_KEY) {
+      log('WS-VERIFY', `RECHAZADO — API key incorrecta: "${apiKey}"`);
+      return cb(false, 401, 'Unauthorized');
+    }
+    log('WS-VERIFY', 'ACEPTADO');
     cb(true);
   },
 });
@@ -72,7 +92,8 @@ wss.on('connection', (ws, req) => {
   const sessionId = req.headers['audiohook-session-id']      || crypto.randomUUID();
   const corrId    = req.headers['audiohook-correlation-id']  || '?';
 
-  console.log(`[AudioHook] ▶ Nueva conexión sesión=${sessionId.slice(0,8)}… org=${orgId.slice(0,8)}…`);
+  log('SESSION', `▶ NUEVA SESIÓN sesión=${sessionId} org=${orgId} corr=${corrId}`);
+  log('SESSION', `  remoteAddress=${req.socket.remoteAddress}`);
 
   const session = {
     ws,
@@ -95,16 +116,20 @@ wss.on('connection', (ws, req) => {
     if (isBinary) {
       // Trama de audio binario (PCMU, headerless)
       session.audioBytes += data.byteLength;
-      // Aquí puedes procesar / reenviar el audio a un servicio externo (p.ej. transcripción)
+      if (session.audioBytes % (16 * 1024) < data.byteLength) {
+        // Log cada ~16KB para no saturar la consola
+        log('AUDIO', `sesión=${sessionId.slice(0,8)} totalKB=${(session.audioBytes/1024).toFixed(1)}`);
+      }
       return;
     }
 
     let msg;
     try { msg = JSON.parse(data); } catch (e) {
-      console.error(`[${sessionId.slice(0,8)}] JSON inválido:`, data.toString().slice(0, 200));
+      log('ERROR', `[${sessionId.slice(0,8)}] JSON inválido:`, data.toString().slice(0, 200));
       return;
     }
 
+    log('MSG-IN', `sesión=${sessionId.slice(0,8)} type=${msg.type} seq=${msg.seq}`);
     session.clientseq = msg.seq ?? session.clientseq;
 
     switch (msg.type) {
@@ -118,7 +143,10 @@ wss.on('connection', (ws, req) => {
         const offered = msg.parameters?.media || [];
         session.mediaFormat = offered[0] ?? null;
 
-        console.log(`[${sessionId.slice(0,8)}] open  conv=${session.conversationId?.slice(0,8)}… lang=${msg.parameters?.language}`);
+        log('OPEN', `sesión=${sessionId.slice(0,8)} conv=${session.conversationId} lang=${msg.parameters?.language}`);
+        log('OPEN', `  participant=${JSON.stringify(session.participant)}`);
+        log('OPEN', `  mediaOffered=${JSON.stringify(offered)}`);
+        log('OPEN', `  mediaSelected=${JSON.stringify(session.mediaFormat)}`);
 
         // Responder con 'opened' seleccionando el primer formato ofrecido
         send(session, 'opened', {
@@ -136,7 +164,7 @@ wss.on('connection', (ws, req) => {
       case 'close': {
         session.state = 'closing';
         const durationSec = ((Date.now() - session.startedAt) / 1000).toFixed(1);
-        console.log(`[${sessionId.slice(0,8)}] close  dur=${durationSec}s  audio=${(session.audioBytes / 1024).toFixed(1)}KB`);
+        log('CLOSE', `sesión=${sessionId.slice(0,8)} dur=${durationSec}s audio=${(session.audioBytes/1024).toFixed(1)}KB reason=${msg.parameters?.reason}`);
         send(session, 'closed', {});
         session.state = 'closed';
         sessions.delete(sessionId);
@@ -144,7 +172,7 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'update': {
-        console.log(`[${sessionId.slice(0,8)}] update lang=${msg.parameters?.language}`);
+        log('UPDATE', `sesión=${sessionId.slice(0,8)} lang=${msg.parameters?.language}`);
         send(session, 'updated', {});
         break;
       }
@@ -162,23 +190,23 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'disconnect': {
-        console.log(`[${sessionId.slice(0,8)}] disconnect reason=${msg.parameters?.reason}`);
+        log('DISCONNECT', `sesión=${sessionId.slice(0,8)} reason=${msg.parameters?.reason}`);
         sessions.delete(sessionId);
         break;
       }
 
       default:
-        console.log(`[${sessionId.slice(0,8)}] msg desconocido type=${msg.type}`);
+        log('MSG-IN', `sesión=${sessionId.slice(0,8)} tipo DESCONOCIDO type=${msg.type} body=${JSON.stringify(msg).slice(0,200)}`);
     }
   });
 
   ws.on('close', (code, reason) => {
-    console.log(`[${sessionId.slice(0,8)}] ✖ WebSocket cerrado code=${code} reason=${reason?.toString()}`);
+    log('WS-CLOSE', `sesión=${sessionId.slice(0,8)} code=${code} reason=${reason?.toString()}`);
     sessions.delete(sessionId);
   });
 
   ws.on('error', (err) => {
-    console.error(`[${sessionId.slice(0,8)}] error:`, err.message);
+    log('WS-ERROR', `sesión=${sessionId.slice(0,8)} ${err.message}`);
     sessions.delete(sessionId);
   });
 });
@@ -194,13 +222,17 @@ function send(session, type, parameters) {
     id:        session.sessionId,
     parameters,
   };
+  log('MSG-OUT', `sesión=${session.sessionId.slice(0,8)} type=${type} seq=${session.seq}`);
   try { session.ws.send(JSON.stringify(msg)); } catch (e) {
-    console.error(`[${session.sessionId.slice(0,8)}] send error:`, e.message);
+    log('ERROR', `sesión=${session.sessionId.slice(0,8)} send error: ${e.message}`);
   }
 }
 
 // ── Arrancar ─────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
+  const maskedKey = API_KEY.length > 8
+    ? API_KEY.slice(0, 4) + '****' + API_KEY.slice(-4)
+    : '****';
   console.log(`\n┌─────────────────────────────────────────────────────┐`);
   console.log(`│  AudioHook Monitor Server                           │`);
   console.log(`│                                                     │`);
@@ -214,4 +246,6 @@ httpServer.listen(PORT, () => {
   console.log(`│    URI: wss://<tu-dominio>/audiohook                │`);
   console.log(`│    API Key: ${API_KEY.padEnd(40)}│`);
   console.log(`└─────────────────────────────────────────────────────┘\n`);
+  log('INIT', `Servidor listo. API_KEY cargada: ${maskedKey} (longitud: ${API_KEY.length})`);
+  log('INIT', `Modo de logs detallados: ACTIVADO`);
 });
