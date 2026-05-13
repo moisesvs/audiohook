@@ -26,6 +26,7 @@ function log(level, ...args) {
 // ── Servidor HTTP base ──────────────────────────────────────────────────────
 const httpServer = http.createServer((req, res) => {
   log('HTTP', `${req.method} ${req.url} from=${req.socket.remoteAddress}`);
+  log('HTTP', `  headers: ${JSON.stringify(req.headers)}`);
 
   // Health check para proxies / load balancers
   if (req.url === '/health') {
@@ -61,6 +62,25 @@ httpServer.on('upgrade', (req) => {
   log('WS-UPGRADE', 'headers:', JSON.stringify(req.headers, null, 2));
 });
 
+// ── Log a nivel TCP: detecta cualquier conexión entrante ──────────────────
+httpServer.on('connection', (socket) => {
+  log('TCP', `Nueva conexión TCP desde ${socket.remoteAddress}:${socket.remotePort}`);
+  socket.on('close', (hadError) => {
+    log('TCP', `Conexión cerrada ${socket.remoteAddress}:${socket.remotePort} hadError=${hadError}`);
+  });
+  socket.on('error', (err) => {
+    log('TCP', `Error en socket ${socket.remoteAddress}:${socket.remotePort} — ${err.message}`);
+  });
+});
+
+// ── Errores del servidor HTTP ─────────────────────────────────────────────
+httpServer.on('error', (err) => {
+  log('SERVER-ERROR', err.message, err.stack);
+});
+
+// ── Errores del servidor WebSocket ───────────────────────────────────────
+// (se define aquí para que quede junto a los otros listeners globales)
+
 // ── Mapa de sesiones activas ────────────────────────────────────────────────
 // sessionId → { ws, orgId, conversationId, participant, mediaFormat, seq, serverseq, startedAt }
 const sessions = new Map();
@@ -87,8 +107,11 @@ const wss = new WebSocketServer({
   },
 });
 
+wss.on('error', (err) => {
+  log('WSS-ERROR', err.message, err.stack);
+});
+
 wss.on('connection', (ws, req) => {
-  const orgId     = req.headers['audiohook-organization-id'] || '?';
   const sessionId = req.headers['audiohook-session-id']      || crypto.randomUUID();
   const corrId    = req.headers['audiohook-correlation-id']  || '?';
 
