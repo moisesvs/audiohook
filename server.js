@@ -16,7 +16,7 @@ const { WebSocketServer } = require('ws');
 const crypto  = require('crypto');
 
 const PORT    = process.env.PORT    || 3001;
-const API_KEY = process.env.API_KEY || 'changeme';
+const API_KEY = (process.env.API_KEY || 'changeme').trim();
 
 function log(level, ...args) {
   const ts = new Date().toISOString();
@@ -27,6 +27,37 @@ function log(level, ...args) {
 const httpServer = http.createServer((req, res) => {
   log('HTTP', `${req.method} ${req.url} from=${req.socket.remoteAddress}`);
   log('HTTP', `  headers: ${JSON.stringify(req.headers)}`);
+
+  // Página de test WebSocket (útil para verificar conectividad desde el navegador)
+  if (req.url === '/test') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html><html><head><title>AudioHook WS Test</title></head><body>
+<h2>Test WebSocket AudioHook</h2>
+<p>URL: <code id="url"></code></p>
+<button onclick="connect()">Conectar</button>
+<button onclick="disconnect()">Desconectar</button>
+<pre id="log" style="background:#111;color:#0f0;padding:12px;height:300px;overflow:auto;font-size:12px"></pre>
+<script>
+  var ws, apiKey = prompt('API Key (dejar vacío para omitir):', '');
+  var wsUrl = location.href.replace(/^http/, 'ws').replace('/test', '/audiohook');
+  document.getElementById('url').textContent = wsUrl;
+  function log(msg) {
+    var el = document.getElementById('log');
+    el.textContent += new Date().toISOString() + ' ' + msg + '\\n';
+    el.scrollTop = el.scrollHeight;
+  }
+  function connect() {
+    var protocols = [];
+    ws = new WebSocket(wsUrl, protocols);
+    ws.onopen = function() { log('[OPEN] Conexión establecida'); };
+    ws.onmessage = function(e) { log('[MSG] ' + e.data); };
+    ws.onerror = function(e) { log('[ERROR] ' + JSON.stringify(e)); };
+    ws.onclose = function(e) { log('[CLOSE] code=' + e.code + ' reason=' + e.reason); };
+  }
+  function disconnect() { if(ws) ws.close(); }
+</script></body></html>`);
+    return;
+  }
 
   // Health check para proxies / load balancers
   if (req.url === '/health') {
@@ -98,8 +129,8 @@ const wss = new WebSocketServer({
       log('WS-VERIFY', 'RECHAZADO — falta cabecera x-api-key');
       return cb(false, 401, 'Unauthorized');
     }
-    if (apiKey !== API_KEY) {
-      log('WS-VERIFY', `RECHAZADO — API key incorrecta: "${apiKey}"`);
+    if (apiKey.trim() !== API_KEY) {
+      log('WS-VERIFY', `RECHAZADO — API key incorrecta. Recibida: "${apiKey.slice(0,8)}…" (len=${apiKey.length}) Esperada: "${API_KEY.slice(0,8)}…" (len=${API_KEY.length})`);
       return cb(false, 401, 'Unauthorized');
     }
     log('WS-VERIFY', 'ACEPTADO');
@@ -112,9 +143,10 @@ wss.on('error', (err) => {
 });
 
 wss.on('connection', (ws, req) => {
-  const orgId     = req.headers['audiohook-organization-id'] || '?';
-  const sessionId = req.headers['audiohook-session-id']      || crypto.randomUUID();
-  const corrId    = req.headers['audiohook-correlation-id']  || '?';
+  try {
+    const orgId     = req.headers['audiohook-organization-id'] || '?';
+    const sessionId = req.headers['audiohook-session-id']      || crypto.randomUUID();
+    const corrId    = req.headers['audiohook-correlation-id']  || '?';
 
   log('SESSION', `▶ NUEVA SESIÓN sesión=${sessionId} org=${orgId} corr=${corrId}`);
   log('SESSION', `  remoteAddress=${req.socket.remoteAddress}`);
@@ -233,6 +265,10 @@ wss.on('connection', (ws, req) => {
     log('WS-ERROR', `sesión=${sessionId.slice(0,8)} ${err.message}`);
     sessions.delete(sessionId);
   });
+  } catch (err) {
+    log('HANDLER-ERROR', `Error no capturado en handler de conexión: ${err.message}`, err.stack);
+    try { ws.close(1011, 'Internal error'); } catch (_) {}
+  }
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
