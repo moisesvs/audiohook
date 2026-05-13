@@ -26,6 +26,24 @@ const httpServer = http.createServer((req, res) => {
     res.end(JSON.stringify({ status: 'ok', activeSessions: sessions.size }));
     return;
   }
+
+  // Lista de sesiones activas
+  if (req.url === '/sessions') {
+    const list = [...sessions.values()].map(s => ({
+      sessionId:      s.sessionId,
+      conversationId: s.conversationId,
+      orgId:          s.orgId,
+      state:          s.state,
+      participant:    s.participant,
+      mediaFormat:    s.mediaFormat,
+      audioKB:        (s.audioBytes / 1024).toFixed(1),
+      durationSec:    ((Date.now() - s.startedAt) / 1000).toFixed(1),
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ total: list.length, sessions: list }, null, 2));
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
@@ -189,6 +207,7 @@ httpServer.listen(PORT, () => {
   console.log(`│  Puerto local : http://localhost:${PORT}               │`);
   console.log(`│  Endpoint WS  : ws://localhost:${PORT}/audiohook       │`);
   console.log(`│  Health check : http://localhost:${PORT}/health        │`);
+  console.log(`│  Sesiones     : http://localhost:${PORT}/sessions      │`);
   console.log(`│                                                     │`);
   console.log(`│  Cuando expongas el servidor públicamente           │`);
   console.log(`│  configura en Genesys:                              │`);
