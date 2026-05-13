@@ -112,6 +112,7 @@ wss.on('error', (err) => {
 });
 
 wss.on('connection', (ws, req) => {
+  const orgId     = req.headers['audiohook-organization-id'] || '?';
   const sessionId = req.headers['audiohook-session-id']      || crypto.randomUUID();
   const corrId    = req.headers['audiohook-correlation-id']  || '?';
 
