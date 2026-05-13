@@ -1,0 +1,16 @@
+{
+  "name": "genesys-audiohook-server",
+  "version": "1.0.0",
+  "description": "AudioHook Monitor server for Genesys Cloud",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
